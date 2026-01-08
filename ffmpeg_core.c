@@ -83,6 +83,19 @@ static AVCodecContext *vctx;
 static int video_stream_index;
 static int loopcontent;
 static bool is_crt = false;
+static const unsigned subtitle_font_base_size = 24;
+static unsigned subtitle_font_size = 64;
+static bool subtitle_font_auto = false;
+static double subtitle_font_scale = 1.0;
+static const char *subtitle_font_name = "DejaVu Sans";
+static int subtitle_font_bold = 0;
+static char subtitle_style_override_font[128];
+static char subtitle_style_override_bold[64];
+static char *subtitle_style_overrides[] = {
+   subtitle_style_override_font,
+   subtitle_style_override_bold,
+   NULL
+};
 
 static double g_current_time = 0.0;  // PTS in seconds
 static slock_t *time_lock    = NULL; // Protects g_current_time
@@ -106,14 +119,20 @@ static int audio_streams_ptr;
 static int subtitle_streams[MAX_STREAMS];
 static int subtitle_streams_num;
 static int subtitle_streams_ptr;
+static bool subtitle_is_ass[MAX_STREAMS];
 
-/* AAS/SSA subtitles. */
+/* ASS/SSA and text-based subtitles via libass. */
 static ASS_Library *ass;
 static ASS_Renderer *ass_render;
 static ASS_Track *ass_track[MAX_STREAMS];
 static uint8_t *ass_extra_data[MAX_STREAMS];
 static size_t ass_extra_data_size[MAX_STREAMS];
 static slock_t *ass_lock;
+static bool first_subtitle_event_logged;
+static bool first_ass_render_logged;
+static bool first_ass_image_logged[MAX_STREAMS];
+static bool first_ass_after_sub_logged[MAX_STREAMS];
+static int64_t first_subtitle_start_ms[MAX_STREAMS];
 
 static struct attachment *attachments;
 static size_t attachments_size;
@@ -486,6 +505,39 @@ void retro_set_environment(retro_environment_t cb)
          }, "auto"
       },
       {
+         "aplayer_subtitle_font_size", "Subtitle Font Size", NULL, NULL, NULL, "video",
+         {
+            {"auto", "Auto"},
+            {"24", NULL},
+            {"32", NULL},
+            {"40", NULL},
+            {"48", NULL},
+            {"56", NULL},
+            {"64", NULL},
+            {"72", NULL},
+            {"80", NULL},
+            {"88", NULL},
+            {"96", NULL},
+            {"104", NULL},
+            {"112", NULL},
+            {"120", NULL},
+            {"128", NULL},
+            {NULL, NULL}
+         }, "auto"
+      },
+      {
+         "aplayer_subtitle_font", "Subtitle Font", NULL, NULL, NULL, "video",
+         {
+            {"dejavu_sans", "DejaVu Sans"},
+            {"dejavu_sans_bold", "DejaVu Sans Bold"},
+            {"dejavu_sans_mono", "DejaVu Sans Mono"},
+            {"dejavu_sans_mono_bold", "DejaVu Sans Mono Bold"},
+            {"dejavu_serif", "DejaVu Serif"},
+            {"dejavu_serif_bold", "DejaVu Serif Bold"},
+            {NULL, NULL}
+         }, "dejavu_sans_mono_bold"
+      },
+      {
          "aplayer_fft_resolution", "Visualizer Resolution", NULL, NULL, NULL, "music",
          {
             {"320x240", NULL},
@@ -561,6 +613,110 @@ static void print_ffmpeg_version()
    PRINT_VERSION(swscale)
 }
 
+static unsigned subtitle_font_size_auto(unsigned height)
+{
+   if (height == 0)
+      return subtitle_font_base_size;
+
+   unsigned size = (height * 7 + 99) / 100; /* ~15% of height */
+   if (size < 24)
+      size = 24;
+   if (size > 128)
+      size = 128;
+   return size;
+}
+
+static void ass_scale_track_styles(ASS_Track *track, double scale)
+{
+   if (!track || scale == 1.0)
+      return;
+
+   for (int i = 0; i < track->n_styles; i++)
+      track->styles[i].FontSize *= scale;
+}
+
+static void ass_scale_all_tracks(double scale)
+{
+   if (scale == 1.0)
+      return;
+
+   for (int i = 0; i < subtitle_streams_num; i++)
+      ass_scale_track_styles(ass_track[i], scale);
+}
+
+static void update_subtitle_font_scale(void)
+{
+   double prev_scale = subtitle_font_scale;
+   unsigned target_size = subtitle_font_size;
+   double target_scale = 1.0;
+
+   if (subtitle_font_auto)
+      target_size = subtitle_font_size_auto(media.height);
+
+   if (target_size == 0)
+      target_size = subtitle_font_base_size;
+
+   subtitle_font_size = target_size;
+   target_scale = (double)target_size / (double)subtitle_font_base_size;
+   if (target_scale <= 0.0)
+      target_scale = 1.0;
+
+   if (ass_render && ass_lock)
+   {
+      double scale_ratio = target_scale / (prev_scale > 0.0 ? prev_scale : 1.0);
+
+      slock_lock(ass_lock);
+      ass_set_font_scale(ass_render, 1.0);
+      ass_scale_all_tracks(scale_ratio);
+      slock_unlock(ass_lock);
+   }
+
+   subtitle_font_scale = target_scale;
+}
+
+static void ass_update_track_fonts(ASS_Track *track, const char *font_name, int bold)
+{
+   if (!track || !font_name)
+      return;
+
+   for (int i = 0; i < track->n_styles; i++)
+   {
+      if (track->styles[i].FontName)
+         free(track->styles[i].FontName);
+      track->styles[i].FontName = strdup(font_name);
+      track->styles[i].Bold = bold ? -1 : 0;
+   }
+}
+
+static void ass_update_all_track_fonts(const char *font_name, int bold)
+{
+   if (!font_name)
+      return;
+
+   for (int i = 0; i < subtitle_streams_num; i++)
+      ass_update_track_fonts(ass_track[i], font_name, bold);
+}
+
+static void update_subtitle_style_overrides(void)
+{
+   if (!ass)
+      return;
+
+   snprintf(subtitle_style_override_font, sizeof(subtitle_style_override_font),
+         "FontName=%s", subtitle_font_name);
+   snprintf(subtitle_style_override_bold, sizeof(subtitle_style_override_bold),
+         "Bold=%d", subtitle_font_bold ? -1 : 0);
+
+   if (ass_lock)
+      slock_lock(ass_lock);
+   ass_set_style_overrides(ass, subtitle_style_overrides);
+   if (ass_render)
+      ass_set_fonts(ass_render, subtitle_font_name, NULL, 1, NULL, 1);
+   ass_update_all_track_fonts(subtitle_font_name, subtitle_font_bold);
+   if (ass_lock)
+      slock_unlock(ass_lock);
+}
+
 static void check_variables(bool firststart)
 {
    struct retro_variable hw_var  = {0};
@@ -568,6 +724,8 @@ static void check_variables(bool firststart)
    struct retro_variable loop_content  = {0};
    struct retro_variable replay_is_crt  = {0};
    struct retro_variable fft_var    = {0};
+   struct retro_variable subtitle_font_var = {0};
+   struct retro_variable subtitle_font_name_var = {0};
 
    fft_var.key = "aplayer_fft_resolution";
 
@@ -582,6 +740,65 @@ static void check_variables(bool firststart)
          fft_height = h;
       }
    }
+
+   subtitle_font_size = 64;
+   subtitle_font_auto = false;
+   subtitle_font_var.key = "aplayer_subtitle_font_size";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &subtitle_font_var) &&
+         subtitle_font_var.value)
+   {
+      if (string_is_equal(subtitle_font_var.value, "auto"))
+      {
+         subtitle_font_auto = true;
+      }
+      else
+      {
+         subtitle_font_size = strtoul(subtitle_font_var.value, NULL, 0);
+         if (subtitle_font_size == 0)
+            subtitle_font_size = 64;
+      }
+   }
+
+   subtitle_font_name = "DejaVu Sans";
+   subtitle_font_bold = 0;
+   subtitle_font_name_var.key = "aplayer_subtitle_font";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &subtitle_font_name_var) &&
+         subtitle_font_name_var.value)
+   {
+      if (string_is_equal(subtitle_font_name_var.value, "dejavu_sans"))
+      {
+         subtitle_font_name = "DejaVu Sans";
+         subtitle_font_bold = 0;
+      }
+      else if (string_is_equal(subtitle_font_name_var.value, "dejavu_sans_bold"))
+      {
+         subtitle_font_name = "DejaVu Sans";
+         subtitle_font_bold = 1;
+      }
+      else if (string_is_equal(subtitle_font_name_var.value, "dejavu_sans_mono"))
+      {
+         subtitle_font_name = "DejaVu Sans Mono";
+         subtitle_font_bold = 0;
+      }
+      else if (string_is_equal(subtitle_font_name_var.value, "dejavu_sans_mono_bold"))
+      {
+         subtitle_font_name = "DejaVu Sans Mono";
+         subtitle_font_bold = 1;
+      }
+      else if (string_is_equal(subtitle_font_name_var.value, "dejavu_serif"))
+      {
+         subtitle_font_name = "DejaVu Serif";
+         subtitle_font_bold = 0;
+      }
+      else if (string_is_equal(subtitle_font_name_var.value, "dejavu_serif_bold"))
+      {
+         subtitle_font_name = "DejaVu Serif";
+         subtitle_font_bold = 1;
+      }
+   }
+
+   update_subtitle_font_scale();
+   update_subtitle_style_overrides();
    /* M3U */
    loop_content.key = "aplayer_loop_content";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &loop_content) && loop_content.value)
@@ -810,6 +1027,9 @@ static void dispaly_time(void)
 
    environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &msg_obj);
 }
+
+static void render_subtitles_on_buffer(uint32_t *buffer, unsigned width,
+      unsigned height, double time_sec);
 
 void retro_run(void)
 {
@@ -1277,6 +1497,12 @@ void retro_run(void)
             for (y = 0; y < media.height; y++, src += stride, data += width/4)
                memcpy(data, src, width);
 
+            double render_time = min_pts;
+            if (pts != AV_NOPTS_VALUE)
+               render_time = av_q2d(fctx->streams[video_stream_index]->time_base) * pts;
+            render_subtitles_on_buffer(video_frame_temp_buffer, media.width,
+                  media.height, render_time);
+
             glBindTexture(GL_TEXTURE_2D, frames[1].tex);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                   media.width, media.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, video_frame_temp_buffer);
@@ -1564,6 +1790,93 @@ static bool codec_id_is_ass(enum AVCodecID id)
    return false;
 }
 
+static bool codec_id_is_text_subtitle(enum AVCodecID id)
+{
+#ifdef AV_CODEC_PROP_TEXT_SUBTITLE
+   const AVCodecDescriptor *desc = avcodec_descriptor_get(id);
+   if (desc && (desc->props & AV_CODEC_PROP_TEXT_SUBTITLE))
+      return true;
+#endif
+   switch (id)
+   {
+#ifdef AV_CODEC_ID_SUBRIP
+      case AV_CODEC_ID_SUBRIP:
+#endif
+#ifdef AV_CODEC_ID_TEXT
+      case AV_CODEC_ID_TEXT:
+#endif
+#ifdef AV_CODEC_ID_WEBVTT
+      case AV_CODEC_ID_WEBVTT:
+#endif
+#ifdef AV_CODEC_ID_MOV_TEXT
+      case AV_CODEC_ID_MOV_TEXT:
+#endif
+         return true;
+      default:
+         break;
+   }
+
+   return false;
+}
+
+static bool codec_name_is_text_subtitle(enum AVCodecID id)
+{
+   const char *name = avcodec_get_name(id);
+
+   if (!name)
+      return false;
+
+   if (strcmp(name, "subrip") == 0 ||
+         strcmp(name, "srt") == 0 ||
+         strcmp(name, "webvtt") == 0 ||
+         strcmp(name, "mov_text") == 0 ||
+         strcmp(name, "text") == 0)
+      return true;
+
+   return false;
+}
+
+static void ass_init_default_track(ASS_Track *track)
+{
+   unsigned play_res_x = media.width ? media.width : 640;
+   unsigned play_res_y = media.height ? media.height : 480;
+   const char *font_name = subtitle_font_name ? subtitle_font_name : "DejaVu Sans";
+   int font_bold = subtitle_font_bold ? -1 : 0;
+   unsigned font_size = subtitle_font_base_size;
+   char header[1024];
+   int len = snprintf(header, sizeof(header),
+         "[Script Info]\n"
+         "ScriptType: v4.00+\n"
+         "PlayResX: %u\n"
+         "PlayResY: %u\n"
+         "\n"
+         "[V4+ Styles]\n"
+         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+         "Style: Default,%s,%u,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,%d,0,0,0,100,100,0,0,1,2,0,2,20,20,20,1\n"
+         "\n"
+         "[Events]\n"
+         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n",
+         play_res_x, play_res_y, font_name, font_size, font_bold);
+
+   if (len <= 0)
+      return;
+   if ((size_t)len >= sizeof(header))
+      len = (int)sizeof(header) - 1;
+
+   ass_process_codec_private(track, header, len);
+}
+
+static int subtitle_slot_for_stream(int stream_index)
+{
+   for (int i = 0; i < subtitle_streams_num; i++)
+   {
+      if (subtitle_streams[i] == stream_index)
+         return i;
+   }
+
+   return -1;
+}
+
 static bool open_codecs(void)
 {
    unsigned i;
@@ -1580,6 +1893,13 @@ static bool open_codecs(void)
 
    memset(audio_streams,    0, sizeof(audio_streams));
    memset(subtitle_streams, 0, sizeof(subtitle_streams));
+   memset(subtitle_is_ass,  0, sizeof(subtitle_is_ass));
+   first_subtitle_event_logged = false;
+   first_ass_render_logged = false;
+   memset(first_ass_image_logged, 0, sizeof(first_ass_image_logged));
+   memset(first_ass_after_sub_logged, 0, sizeof(first_ass_after_sub_logged));
+   for (i = 0; i < MAX_STREAMS; i++)
+      first_subtitle_start_ms[i] = -1;
 
    for (i = 0; i < fctx->nb_streams; i++)
    {
@@ -1606,13 +1926,28 @@ static bool open_codecs(void)
             break;
 
          case AVMEDIA_TYPE_SUBTITLE:
-            if (subtitle_streams_num < MAX_STREAMS
-                  && codec_id_is_ass(fctx->streams[i]->codecpar->codec_id))
+            if (subtitle_streams_num < MAX_STREAMS)
             {
                int size;
                AVCodecContext **s = &sctx[subtitle_streams_num];
+               const enum AVCodecID sub_id = fctx->streams[i]->codecpar->codec_id;
+               const char *codec_name = avcodec_get_name(sub_id);
+               bool is_ass = codec_id_is_ass(sub_id);
+               bool is_text = codec_id_is_text_subtitle(sub_id) ||
+                     codec_name_is_text_subtitle(sub_id);
+
+               log_cb(RETRO_LOG_INFO, "[APLAYER] Found subtitle stream %u: %s\n",
+                     i, codec_name ? codec_name : "unknown");
+
+               if (!is_ass && !is_text)
+               {
+                  log_cb(RETRO_LOG_WARN, "[APLAYER] Subtitle codec not supported: %s\n",
+                        codec_name ? codec_name : "unknown");
+                  break;
+               }
 
                subtitle_streams[subtitle_streams_num] = i;
+               subtitle_is_ass[subtitle_streams_num] = is_ass;
                if (!open_codec(s, type, i))
                   return false;
 
@@ -1626,6 +1961,9 @@ static bool open_codecs(void)
                }
 
                subtitle_streams_num++;
+               log_cb(RETRO_LOG_INFO, "[APLAYER] Subtitle stream %u registered: %s (%s)\n",
+                     i, codec_name ? codec_name : "unknown",
+                     is_ass ? "ass" : "text");
             }
             break;
 
@@ -1721,12 +2059,22 @@ static bool init_media_info(void)
       ass_set_extract_fonts(ass, true);
       ass_set_fonts(ass_render, NULL, NULL, 1, NULL, 1);
       ass_set_hinting(ass_render, ASS_HINTING_LIGHT);
+      update_subtitle_style_overrides();
+      update_subtitle_font_scale();
 
       for (i = 0; i < (unsigned)subtitle_streams_num; i++)
       {
          ass_track[i] = ass_new_track(ass);
-         ass_process_codec_private(ass_track[i], (char*)ass_extra_data[i],
-               ass_extra_data_size[i]);
+         if (ass_track[i])
+         {
+            if (subtitle_is_ass[i] && ass_extra_data_size[i] > 0)
+               ass_process_codec_private(ass_track[i], (char*)ass_extra_data[i],
+                     ass_extra_data_size[i]);
+            else
+               ass_init_default_track(ass_track[i]);
+
+            ass_scale_track_styles(ass_track[i], subtitle_font_scale);
+         }
       }
    }
 
@@ -1814,6 +2162,218 @@ static void render_ass_img(AVFrame *conv_frame, ASS_Image *img)
    }
 }
 
+static void render_subtitles_on_buffer(uint32_t *buffer, unsigned width,
+      unsigned height, double time_sec)
+{
+   ASS_Track *render_track = NULL;
+   int subtitle_ptr = -1;
+   int64_t track_start_ms = -1;
+
+   if (!buffer || width == 0 || height == 0)
+      return;
+
+   if (!ass_render || subtitle_streams_num <= 0)
+      return;
+
+   if (decode_thread_lock)
+   {
+      slock_lock(decode_thread_lock);
+      if (subtitle_streams_num > 0)
+      {
+         subtitle_ptr = subtitle_streams_ptr;
+         render_track = ass_track[subtitle_streams_ptr];
+      }
+      slock_unlock(decode_thread_lock);
+   }
+
+   if (!render_track)
+      return;
+
+   if (subtitle_ptr >= 0 && subtitle_ptr < MAX_STREAMS)
+      track_start_ms = first_subtitle_start_ms[subtitle_ptr];
+
+   AVFrame tmp_frame;
+   memset(&tmp_frame, 0, sizeof(tmp_frame));
+   tmp_frame.data[0] = (uint8_t*)buffer;
+   tmp_frame.linesize[0] = (int)width * (int)sizeof(uint32_t);
+
+   slock_lock(ass_lock);
+   if (ass_render)
+   {
+      int change = 0;
+      long long now_ms = (long long)(time_sec * 1000.0);
+      ASS_Image *img = ass_render_frame(ass_render, render_track, now_ms, &change);
+
+      if (!first_ass_render_logged)
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[APLAYER] ass_render_frame first call: images=%s change=%d time_ms=%lld\n",
+               img ? "yes" : "no", change, now_ms);
+         first_ass_render_logged = true;
+      }
+
+      if (subtitle_ptr >= 0 && subtitle_ptr < MAX_STREAMS &&
+            img && !first_ass_image_logged[subtitle_ptr])
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[APLAYER] ass_render_frame first non-null image: change=%d time_ms=%lld track=%d first_sub_start_ms=%lld\n",
+               change, now_ms, subtitle_ptr, (long long)track_start_ms);
+         first_ass_image_logged[subtitle_ptr] = true;
+      }
+      else if (subtitle_ptr >= 0 && subtitle_ptr < MAX_STREAMS &&
+            !img && !first_ass_after_sub_logged[subtitle_ptr] &&
+            track_start_ms >= 0 &&
+            now_ms >= track_start_ms)
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[APLAYER] ass_render_frame no image at/after first subtitle start: change=%d time_ms=%lld track=%d first_sub_start_ms=%lld\n",
+               change, now_ms, subtitle_ptr, (long long)track_start_ms);
+         first_ass_after_sub_logged[subtitle_ptr] = true;
+      }
+
+      if (img)
+         render_ass_img(&tmp_frame, img);
+   }
+   slock_unlock(ass_lock);
+}
+
+static char *ass_escape_text(const char *text)
+{
+   size_t len = strlen(text);
+   char *out = (char*)malloc(len * 2 + 1);
+   char *dst = out;
+
+   if (!out)
+      return NULL;
+
+   for (const char *src = text; *src; src++)
+   {
+      if (*src == '\r')
+         continue;
+      if (*src == '\n')
+      {
+         *dst++ = '\\';
+         *dst++ = 'N';
+         continue;
+      }
+
+      if (*src == '{' || *src == '}' || *src == '\\')
+         *dst++ = '\\';
+
+      *dst++ = *src;
+   }
+
+   *dst = '\0';
+   return out;
+}
+
+static void ass_process_line(ASS_Track *track, const char *line)
+{
+   if (!line || !*line)
+      return;
+
+   const char *prefix = "";
+   if (strncmp(line, "Dialogue:", 9) != 0 &&
+         strncmp(line, "Comment:", 8) != 0 &&
+         strncmp(line, "Style:", 6) != 0 &&
+         strncmp(line, "Format:", 7) != 0 &&
+         line[0] != '[')
+      prefix = "Dialogue: ";
+
+   size_t prefix_len = strlen(prefix);
+   size_t len = strlen(line);
+   bool has_newline = len > 0 && line[len - 1] == '\n';
+   size_t total_len = prefix_len + len + (has_newline ? 0 : 1);
+
+   char *buf = (char*)malloc(total_len + 1);
+   if (!buf)
+      return;
+
+   memcpy(buf, prefix, prefix_len);
+   memcpy(buf + prefix_len, line, len);
+   if (!has_newline)
+      buf[prefix_len + len] = '\n';
+   buf[total_len] = '\0';
+
+   ass_process_data(track, buf, total_len);
+   free(buf);
+}
+
+static const char *ass_event_payload(const char *ass)
+{
+   const char *last_comma = NULL;
+
+   if (!ass)
+      return NULL;
+
+   for (const char *p = ass; *p; p++)
+   {
+      if (*p == ',')
+         last_comma = p;
+   }
+
+   if (!last_comma || !last_comma[1])
+      return ass;
+
+   return last_comma + 1;
+}
+
+static void ass_format_time(int64_t ms, char *buf, size_t buf_len)
+{
+   if (!buf || buf_len == 0)
+      return;
+
+   if (ms < 0)
+      ms = 0;
+
+   int centiseconds = (int)((ms / 10) % 100);
+   int seconds = (int)((ms / 1000) % 60);
+   int minutes = (int)((ms / 60000) % 60);
+   int hours = (int)(ms / 3600000);
+
+   snprintf(buf, buf_len, "%d:%02d:%02d.%02d", hours, minutes, seconds, centiseconds);
+}
+
+static void ass_add_text_event_raw(ASS_Track *track, int64_t start_ms, int64_t end_ms, const char *text)
+{
+   if (!text)
+      return;
+
+   if (end_ms <= start_ms)
+      end_ms = start_ms + 2000;
+
+   char start_buf[32];
+   char end_buf[32];
+   ass_format_time(start_ms, start_buf, sizeof(start_buf));
+   ass_format_time(end_ms, end_buf, sizeof(end_buf));
+
+   size_t text_len = strlen(text);
+   size_t line_cap = text_len + 96;
+   char *line = (char*)malloc(line_cap);
+   if (!line)
+      return;
+
+   snprintf(line, line_cap, "Dialogue: 0,%s,%s,Default,,0,0,0,,%s",
+         start_buf, end_buf, text);
+   ass_process_line(track, line);
+   free(line);
+}
+
+static void ass_add_text_event(ASS_Track *track, int64_t start_ms, int64_t end_ms, const char *text)
+{
+   char *escaped = ass_escape_text(text);
+
+   if (!escaped)
+      return;
+
+   if (end_ms <= start_ms)
+      end_ms = start_ms + 2000;
+
+   ass_add_text_event_raw(track, start_ms, end_ms, escaped);
+
+   free(escaped);
+}
+
 static void sws_worker_thread(void *arg)
 {
    int ret = 0;
@@ -1842,17 +2402,6 @@ static void sws_worker_thread(void *arg)
    }
 
    ctx->pts = ctx->source->best_effort_timestamp;
-
-   double video_time = ctx->pts * av_q2d(fctx->streams[video_stream_index]->time_base);
-   slock_lock(ass_lock);
-   if (ass_render && ctx->ass_track_active)
-   {
-      int change     = 0;
-      ASS_Image *img = ass_render_frame(ass_render, ctx->ass_track_active,
-            1000 * video_time, &change);
-      render_ass_img(ctx->target, img);
-   }
-   slock_unlock(ass_lock);
 
    av_frame_unref(ctx->source);
    av_frame_unref(ctx->hw_source);
@@ -2014,6 +2563,7 @@ static int16_t *decode_audio(AVCodecContext *ctx, AVPacket *pkt,
 static void decode_thread_seek(double time)
 {
    int64_t seek_to = time * AV_TIME_BASE;
+   int i = 0;
 
    if (seek_to < 0)
       seek_to = 0;
@@ -2033,10 +2583,13 @@ static void decode_thread_seek(double time)
       avcodec_flush_buffers(actx[audio_streams_ptr]);
    if (vctx)
       avcodec_flush_buffers(vctx);
-   if (sctx[subtitle_streams_ptr])
-      avcodec_flush_buffers(sctx[subtitle_streams_ptr]);
-   if (ass_track[subtitle_streams_ptr])
-      ass_flush_events(ass_track[subtitle_streams_ptr]);
+   for (i = 0; i < subtitle_streams_num; i++)
+   {
+      if (sctx[i])
+         avcodec_flush_buffers(sctx[i]);
+      if (ass_track[i])
+         ass_flush_events(ass_track[i]);
+   }
 }
 
 /**
@@ -2125,7 +2678,6 @@ static void decode_thread(void *data)
       }
 
       bool seek;
-      int subtitle_stream;
       double seek_time_thread;
       int audio_stream_index, audio_stream_ptr;
 
@@ -2141,7 +2693,6 @@ static void decode_thread(void *data)
          break;
       }
       AVCodecContext *actx_active = NULL;
-      AVCodecContext *sctx_active = NULL;
       ASS_Track *ass_track_active = NULL;
 
       slock_lock(fifo_lock);
@@ -2175,9 +2726,7 @@ static void decode_thread(void *data)
       slock_lock(decode_thread_lock);
       audio_stream_index          = audio_streams[audio_streams_ptr];
       audio_stream_ptr            = audio_streams_ptr;
-      subtitle_stream             = subtitle_streams[subtitle_streams_ptr];
       actx_active                 = actx[audio_streams_ptr];
-      sctx_active                 = sctx[subtitle_streams_ptr];
       ass_track_active            = ass_track[subtitle_streams_ptr];
       audio_timebase = av_q2d(fctx->streams[audio_stream_index]->time_base);
       if (video_stream_index >= 0)
@@ -2438,32 +2987,128 @@ static void decode_thread(void *data)
             packet_buffer_add_packet(audio_packet_buffer, pkt_local);
          else if (pkt_local->stream_index == video_stream_index)
             packet_buffer_add_packet(video_packet_buffer, pkt_local);
-         else if (pkt_local->stream_index == subtitle_stream && sctx_active)
+         else
          {
+            int subtitle_slot = subtitle_slot_for_stream(pkt_local->stream_index);
+            AVCodecContext *sctx_sub = NULL;
+            ASS_Track *ass_track_sub = NULL;
+
+            if (subtitle_slot < 0)
+            {
+               av_packet_unref(pkt_local);
+               av_packet_free(&pkt_local);
+               continue;
+            }
+
+            sctx_sub = sctx[subtitle_slot];
+            ass_track_sub = ass_track[subtitle_slot];
+            if (!sctx_sub)
+            {
+               av_packet_unref(pkt_local);
+               av_packet_free(&pkt_local);
+               continue;
+            }
+
             /**
-             * Decode subtitle packets right away, since SSA/ASS can operate this way.
-             * If we ever support other subtitles, we need to handle this with a
-             * buffer too
+             * Decode subtitle packets right away for ASS/SSA and text subtitles.
+             * Bitmap subtitles would need buffering and blending.
              **/
             AVSubtitle sub;
             int finished = 0;
+            int64_t base_time_ms = 0;
+            int64_t start_ms = 0;
+            int64_t end_ms = 0;
 
             memset(&sub, 0, sizeof(sub));
 
             while (!finished)
             {
-               if (avcodec_decode_subtitle2(sctx_active, &sub, &finished, pkt_local) < 0)
+               if (avcodec_decode_subtitle2(sctx_sub, &sub, &finished, pkt_local) < 0)
                {
                   log_cb(RETRO_LOG_ERROR, "[APLAYER] Decode subtitles failed.\n");
                   break;
                }
             }
+
+            if (pkt_local->pts != AV_NOPTS_VALUE)
+               base_time_ms = (int64_t)(pkt_local->pts *
+                     av_q2d(fctx->streams[pkt_local->stream_index]->time_base) * 1000.0);
+            else if (sub.pts != AV_NOPTS_VALUE)
+               base_time_ms = sub.pts / 1000;
+
+            start_ms = base_time_ms + sub.start_display_time;
+            end_ms = base_time_ms + sub.end_display_time;
+
             for (i = 0; i < sub.num_rects; i++)
             {
+               if (!sub.rects[i])
+                  continue;
                slock_lock(ass_lock);
-               if (sub.rects[i]->ass && ass_track_active)
-                  ass_process_data(ass_track_active,
-                        sub.rects[i]->ass, strlen(sub.rects[i]->ass));
+               if (ass_track_sub)
+               {
+                  if (subtitle_is_ass[subtitle_slot])
+                  {
+                     if (sub.rects[i]->ass)
+                     {
+                        if (!first_subtitle_event_logged)
+                        {
+                           const char *payload = sub.rects[i]->ass;
+                           if (first_subtitle_start_ms[subtitle_slot] < 0)
+                              first_subtitle_start_ms[subtitle_slot] = start_ms;
+                           log_cb(RETRO_LOG_INFO,
+                                 "[APLAYER] First subtitle event (ass): stream=%d slot=%d start_ms=%lld end_ms=%lld text=\"%.200s\"\n",
+                                 pkt_local->stream_index, subtitle_slot,
+                                 (long long)start_ms, (long long)end_ms,
+                                 payload ? payload : "(null)");
+                           first_subtitle_event_logged = true;
+                        }
+                        ass_process_line(ass_track_sub, sub.rects[i]->ass);
+                     }
+                     else if (sub.rects[i]->text)
+                     {
+                        if (!first_subtitle_event_logged)
+                        {
+                           const char *payload = sub.rects[i]->text;
+                           if (first_subtitle_start_ms[subtitle_slot] < 0)
+                              first_subtitle_start_ms[subtitle_slot] = start_ms;
+                           log_cb(RETRO_LOG_INFO,
+                                 "[APLAYER] First subtitle event (text): stream=%d slot=%d start_ms=%lld end_ms=%lld text=\"%.200s\"\n",
+                                 pkt_local->stream_index, subtitle_slot,
+                                 (long long)start_ms, (long long)end_ms,
+                                 payload ? payload : "(null)");
+                           first_subtitle_event_logged = true;
+                        }
+                        ass_add_text_event(ass_track_sub,
+                              start_ms, end_ms, sub.rects[i]->text);
+                     }
+                  }
+                  else
+                  {
+                     const char *raw_text = sub.rects[i]->text;
+                     const char *ass_payload = NULL;
+
+                     if (!raw_text && sub.rects[i]->ass)
+                        ass_payload = ass_event_payload(sub.rects[i]->ass);
+
+                     if (!first_subtitle_event_logged)
+                     {
+                        const char *payload = raw_text ? raw_text : ass_payload;
+                        if (first_subtitle_start_ms[subtitle_slot] < 0)
+                           first_subtitle_start_ms[subtitle_slot] = start_ms;
+                        log_cb(RETRO_LOG_INFO,
+                              "[APLAYER] First subtitle event (text): stream=%d slot=%d start_ms=%lld end_ms=%lld text=\"%.200s\"\n",
+                              pkt_local->stream_index, subtitle_slot,
+                              (long long)start_ms, (long long)end_ms,
+                              payload ? payload : "(null)");
+                        first_subtitle_event_logged = true;
+                     }
+
+                     if (raw_text)
+                        ass_add_text_event(ass_track_sub, start_ms, end_ms, raw_text);
+                     else if (ass_payload)
+                        ass_add_text_event_raw(ass_track_sub, start_ms, end_ms, ass_payload);
+                  }
+               }
                slock_unlock(ass_lock);
             }
             avsubtitle_free(&sub);
