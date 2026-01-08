@@ -28,6 +28,7 @@
 #include <string/stdstring.h>
 #include "include/packet_buffer.h"
 #include "include/video_buffer.h"
+#include "include/dlna_browser.h"
 
 #include <libretro.h>
 #include <unistd.h>
@@ -57,6 +58,12 @@ retro_log_printf_t log_cb;
 static char playlist[MAX_PLAYLIST_ENTRIES][PATH_MAX];
 static unsigned playlist_count = 0;
 static unsigned playlist_index = 0;  
+
+/* DLNA browser mode */
+static dlna_browser_t dlna_browser;
+static bool dlna_mode = false;
+static uint32_t *dlna_framebuffer = NULL;
+static char dlna_manual_url[256] = {0};
 
 static bool reset_triggered;
 static bool libretro_supports_bitmasks = false;
@@ -256,6 +263,64 @@ static bool parse_m3u_playlist(const char* path)
    return true;
 }
 
+/* Parse a .dlna configuration file
+ * Format:
+ *   url=http://192.168.1.100:8200/rootDesc.xml
+ * If no file content or just "auto", use auto-discovery
+ */
+static bool parse_dlna_config(const char* path)
+{
+   log_cb(RETRO_LOG_INFO, "[APLAYER] Loading DLNA config: %s\n", path);
+
+   FILE* file = fopen(path, "r");
+   if (!file)
+   {
+      /* No file = auto discovery */
+      dlna_manual_url[0] = '\0';
+      return true;
+   }
+
+   char line[512];
+   dlna_manual_url[0] = '\0';
+
+   while (fgets(line, sizeof(line), file))
+   {
+      char* trimmed = line;
+      while (isspace(*trimmed)) trimmed++;
+
+      if (*trimmed == '#' || *trimmed == '\0' || *trimmed == '\n')
+         continue;
+
+      size_t len = strlen(trimmed);
+      while (len > 0 && (trimmed[len-1] == '\r' || trimmed[len-1] == '\n' || trimmed[len-1] == ' '))
+         trimmed[--len] = '\0';
+
+      char* eq = strchr(trimmed, '=');
+      if (!eq) continue;
+
+      *eq = '\0';
+      char* key = trimmed;
+      char* value = eq + 1;
+
+      while (*key && isspace(key[strlen(key)-1])) key[strlen(key)-1] = '\0';
+      while (*value && isspace(*value)) value++;
+
+      if (strcasecmp(key, "url") == 0 || strcasecmp(key, "server") == 0)
+      {
+         strncpy(dlna_manual_url, value, sizeof(dlna_manual_url) - 1);
+      }
+   }
+
+   fclose(file);
+
+   if (dlna_manual_url[0])
+      log_cb(RETRO_LOG_INFO, "[APLAYER] DLNA manual server: %s\n", dlna_manual_url);
+   else
+      log_cb(RETRO_LOG_INFO, "[APLAYER] DLNA auto-discovery mode\n");
+
+   return true;
+}
+
 static void ass_msg_cb(int level, const char *fmt, va_list args, void *data)
 {
    char buffer[4096];
@@ -362,7 +427,7 @@ void retro_get_system_info(struct retro_system_info *info)
    info->library_name     = "Alpha Player";
    info->library_version  = "v2.1.0";
    info->need_fullpath    = true;
-   info->valid_extensions = "mkv|avi|f4v|f4f|3gp|ogm|flv|mp4|mp3|flac|ogg|m4a|webm|3g2|mov|wmv|mpg|mpeg|vob|asf|divx|m2p|m2ts|ps|ts|mxf|wma|wav|m3u";
+   info->valid_extensions = "mkv|avi|f4v|f4f|3gp|ogm|flv|mp4|mp3|flac|ogg|m4a|webm|3g2|mov|wmv|mpg|mpeg|vob|asf|divx|m2p|m2ts|ps|ts|mxf|wma|wav|m3u|dlna";
 }
 
 void retro_get_system_av_info(struct retro_system_av_info *info)
@@ -811,6 +876,67 @@ void retro_run(void)
    r     = ret & (1 << RETRO_DEVICE_ID_JOYPAD_R);
    l2    = ret & (1 << RETRO_DEVICE_ID_JOYPAD_L2);
    r2    = ret & (1 << RETRO_DEVICE_ID_JOYPAD_R2);
+
+   /* DLNA browser mode */
+   if (dlna_mode && !dlna_browser_is_playing(&dlna_browser))
+   {
+      /* Handle browser input */
+      if (up && !last_up)       dlna_browser_input_up(&dlna_browser);
+      if (down && !last_down)   dlna_browser_input_down(&dlna_browser);
+      if (a && !last_a)         dlna_browser_input_select(&dlna_browser);
+      if (b && !last_b)         dlna_browser_input_back(&dlna_browser);
+      if (l && !last_l)         dlna_browser_input_pageup(&dlna_browser);
+      if (r && !last_r)         dlna_browser_input_pagedown(&dlna_browser);
+      
+      /* Check if user selected something to play */
+      if (dlna_browser_wants_to_play(&dlna_browser))
+      {
+         const char *stream_url = dlna_browser_get_selected_url(&dlna_browser);
+         if (stream_url && strlen(stream_url) > 0)
+         {
+            log_cb(RETRO_LOG_INFO, "[APLAYER] Loading DLNA stream: %s\n", stream_url);
+            
+            /* TODO: Load stream via FFmpeg - for now just show message */
+            dlna_browser_playback_started(&dlna_browser);
+            
+            struct retro_message_ext msg_obj = {0};
+            msg_obj.msg = "Loading stream...";
+            msg_obj.duration = 2000;
+            msg_obj.priority = 1;
+            msg_obj.level = RETRO_LOG_INFO;
+            msg_obj.target = RETRO_MESSAGE_TARGET_ALL;
+            msg_obj.type = RETRO_MESSAGE_TYPE_NOTIFICATION;
+            msg_obj.progress = -1;
+            environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &msg_obj);
+         }
+      }
+      
+      /* Update browser state */
+      dlna_browser_update(&dlna_browser);
+      
+      /* Render browser UI */
+      dlna_browser_render(&dlna_browser, dlna_framebuffer);
+      
+      /* Send frame to frontend */
+      video_cb(dlna_framebuffer, dlna_browser.ui_width, dlna_browser.ui_height,
+               dlna_browser.ui_width * sizeof(uint32_t));
+      
+      /* Update last input state */
+      last_left  = left;
+      last_right = right;
+      last_up    = up;
+      last_down  = down;
+      last_start = start;
+      last_a     = a;
+      last_b     = b;
+      last_x     = x;
+      last_y     = y;
+      last_l     = l;
+      last_r     = r;
+      last_l2    = l2;
+      last_r2    = r2;
+      return;
+   }
 
    if (!decode_thread_dead)
    {
@@ -2450,6 +2576,15 @@ void retro_unload_game(void)
 {
    unsigned i;
 
+   /* Clean up DLNA browser state */
+   if (dlna_framebuffer)
+   {
+      free(dlna_framebuffer);
+      dlna_framebuffer = NULL;
+   }
+   dlna_mode = false;
+   dlna_browser_reset(&dlna_browser);
+
    if (decode_thread_handle)
    {
       /* Stop the decode thread first */
@@ -2571,6 +2706,47 @@ bool retro_load_game(const struct retro_game_info *info)
    const char* ext = strrchr(info->path, '.');
    // Local mutable retro_game_info
    struct retro_game_info local_info;
+
+   /* Check for .dlna file - enter DLNA browser mode */
+   if (ext && strcasecmp(ext, ".dlna") == 0)
+   {
+      parse_dlna_config(info->path);
+
+      dlna_mode = true;
+      
+      /* Read FFT resolution setting first */
+      check_variables(true);
+      
+      /* Initialize browser with same resolution as FFT visualizer */
+      dlna_browser_init(&dlna_browser);
+      dlna_browser_set_resolution(&dlna_browser, fft_width, fft_height);
+      
+      /* Allocate framebuffer */
+      if (dlna_framebuffer)
+         free(dlna_framebuffer);
+      dlna_framebuffer = (uint32_t*)malloc(fft_width * fft_height * sizeof(uint32_t));
+      if (!dlna_framebuffer)
+      {
+         log_cb(RETRO_LOG_ERROR, "[APLAYER] Failed to allocate DLNA framebuffer\n");
+         return false;
+      }
+      
+      /* Add manual server if specified, then start discovery */
+      if (dlna_manual_url[0])
+      {
+         dlna_browser_add_manual_server(&dlna_browser, dlna_manual_url);
+      }
+      
+      /* Start auto-discovery for additional servers */
+      dlna_browser_start_discovery(&dlna_browser);
+      
+      /* Set up timing for browser mode */
+      media.interpolate_fps = 60.0;
+      media.sample_rate = 32000.0;
+      
+      log_cb(RETRO_LOG_INFO, "[APLAYER] Entered DLNA browser mode\n");
+      return true;
+   }
 
    if (ext && strcasecmp(ext, ".m3u") == 0)
    {

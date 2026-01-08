@@ -1,0 +1,25 @@
+# DLNA Media Server Configuration
+# 
+# This file tells Alpha Player how to connect to DLNA media servers.
+# When loaded, you'll enter the DLNA browser to browse and play media.
+#
+# AUTO-DISCOVERY:
+# Leave this file empty or with no url= line to auto-discover
+# all DLNA servers on your local network.
+#
+# MANUAL SERVER:
+# Specify a server URL to prioritize that server (auto-discovery
+# will still find additional servers):
+#
+# url=http://192.168.1.100:8200/rootDesc.xml
+#
+# No authentication required - DLNA uses open local network access.
+#
+# SUPPORTED SERVERS:
+# - Plex (enable DLNA in server settings)
+# - Jellyfin (enable DLNA in Dashboard > DLNA)
+# - Emby
+# - MiniDLNA / ReadyMedia
+# - Universal Media Server
+# - Windows Media Player Network Sharing
+# - Most NAS devices (Synology, QNAP, etc.)
