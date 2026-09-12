@@ -11,3 +11,5 @@ NOTES.md
 *.o
 .vscode/pro-deployer.json
 alpha_player_libretro.so
+
+/build/

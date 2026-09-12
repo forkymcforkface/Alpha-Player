@@ -20,6 +20,7 @@
 #include <libswresample/swresample.h>
 #include <ass/ass.h>
 #include "include/ffmpeg_core.h"
+#include "include/aplayer_ui.h"
 #include "include/ffmpeg_fft.h"
 #include "include/midi_backend.h"
 
@@ -2032,21 +2033,6 @@ static unsigned aplayer_get_content_region(void)
    return RETRO_REGION_NTSC;
 }
 
-static void format_time_hhmmss(double seconds, char *out, size_t out_size)
-{
-   if (!out || out_size == 0)
-      return;
-
-   if (seconds < 0.0)
-      seconds = 0.0;
-
-   unsigned total = (unsigned)seconds;
-   unsigned hours = total / 3600;
-   unsigned minutes = (total % 3600) / 60;
-   unsigned secs = total % 60;
-
-   snprintf(out, out_size, "%02u:%02u:%02u", hours, minutes, secs);
-}
 
 static void show_not_supported_message(void)
 {
@@ -2078,26 +2064,6 @@ static void show_midi_limitations_message(void)
    environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &msg_obj);
 }
 
-static const char *aplayer_filename_from_path(const char *path)
-{
-   const char *filename_unix = NULL;
-   const char *filename_windows = NULL;
-
-   if (!path || !path[0])
-      return NULL;
-
-   filename_unix = strrchr(path, '/');
-   filename_windows = strrchr(path, '\\');
-
-   if (filename_unix && filename_windows)
-      return (filename_unix > filename_windows ? filename_unix : filename_windows) + 1;
-   if (filename_unix)
-      return filename_unix + 1;
-   if (filename_windows)
-      return filename_windows + 1;
-
-   return path;
-}
 
 static void aplayer_copy_path(char *dst, size_t size, const char *src)
 {
@@ -2222,7 +2188,7 @@ static void aplayer_show_resume_message(double playback_time)
    char time_str[16];
    struct retro_message_ext msg_obj = {0};
 
-   format_time_hhmmss(playback_time, time_str, sizeof(time_str));
+   aplayer_format_time(playback_time, time_str, sizeof(time_str));
    snprintf(msg, sizeof(msg), "Resumed from %s", time_str);
 
    msg_obj.msg      = msg;
@@ -3283,9 +3249,9 @@ static void seek_frame(int seek_frames)
    do_seek = true;
 
    /* Convert seek time to a printable format */
-   format_time_hhmmss(seek_time, seek_time_str, sizeof(seek_time_str));
+   aplayer_format_time(seek_time, seek_time_str, sizeof(seek_time_str));
    if (duration_valid)
-      format_time_hhmmss(media.duration.time, total_time_str, sizeof(total_time_str));
+      aplayer_format_time(media.duration.time, total_time_str, sizeof(total_time_str));
    else
       snprintf(total_time_str, sizeof(total_time_str), "--:--:--");
 
@@ -3436,9 +3402,9 @@ static void dispaly_time(void)
    if (aplayer_playback_has_ended() && total_valid)
       current_time = total_duration;
 
-   format_time_hhmmss(current_time, current_str, sizeof(current_str));
+   aplayer_format_time(current_time, current_str, sizeof(current_str));
    if (total_valid)
-      format_time_hhmmss(total_duration, total_str, sizeof(total_str));
+      aplayer_format_time(total_duration, total_str, sizeof(total_str));
    else
       snprintf(total_str, sizeof(total_str), "--:--:--");
 
@@ -4818,18 +4784,14 @@ void retro_run(void)
    /* Seek */
    if (!decode_thread_dead || aplayer_playback_has_ended())
    {
-      if (left && !last_left)
-         seek_frames -= 15 * media.interpolate_fps;
-      if (right && !last_right)
-         seek_frames += 15 * media.interpolate_fps;
-      if (up && !last_up)
-         seek_frames += 180 * media.interpolate_fps;
-      if (down && !last_down)
-         seek_frames -= 180 * media.interpolate_fps;
-      if (l2 && !last_l2)
-         seek_frames -= 300 * media.interpolate_fps;
-      if (r2 && !last_r2)
-         seek_frames += 300 * media.interpolate_fps;
+      uint16_t pressed = 0;
+      if (left && !last_left) pressed |= 1u << RETRO_DEVICE_ID_JOYPAD_LEFT;
+      if (right && !last_right) pressed |= 1u << RETRO_DEVICE_ID_JOYPAD_RIGHT;
+      if (up && !last_up) pressed |= 1u << RETRO_DEVICE_ID_JOYPAD_UP;
+      if (down && !last_down) pressed |= 1u << RETRO_DEVICE_ID_JOYPAD_DOWN;
+      if (l2 && !last_l2) pressed |= 1u << RETRO_DEVICE_ID_JOYPAD_L2;
+      if (r2 && !last_r2) pressed |= 1u << RETRO_DEVICE_ID_JOYPAD_R2;
+      seek_frames += aplayer_seek_frames(pressed, media.interpolate_fps);
    }
 
    last_left  = left;

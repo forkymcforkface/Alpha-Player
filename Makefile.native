@@ -1,0 +1,10 @@
+# Native embedding checks require only a C99 compiler; no FFmpeg or GL.
+CC ?= cc
+BUILD ?= build/native
+CFLAGS ?= -O2 -Wall -Wextra -Werror
+.PHONY: test
+test: $(BUILD)/ui-test
+	$(BUILD)/ui-test
+$(BUILD)/ui-test: tests/ui_test.c include/aplayer_ui.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -std=c99 $< -o $@
