@@ -8155,7 +8155,6 @@ static void decode_thread(void *data)
    bool eof                = false;
    struct SwrContext *swr[(audio_streams_num > 0) ? audio_streams_num : 1];
    AVFrame *aud_frame      = NULL;
-   size_t frame_size       = 0;
    int16_t *audio_buffer   = NULL;
    size_t audio_buffer_cap = 0;
    bool audio_clock_rebase_pending = false;
@@ -8233,9 +8232,6 @@ static void decode_thread(void *data)
    {
       AVStream *video_stream = fctx->streams[video_stream_index];
 
-      frame_size = av_image_get_buffer_size(AV_PIX_FMT_YUV420P,
-            media.width, media.height, 1);
-      video_buffer = video_buffer_create(4, frame_size, media.width, media.height);
       tpool = tpool_create(sw_sws_threads);
       log_cb(RETRO_LOG_INFO, "[APLAYER] Configured worker threads: %d\n", sw_sws_threads);
 
@@ -9526,6 +9522,25 @@ media_ready:
       audio_decode_fifo = fifo_new(
          media.sample_rate * sizeof(int16_t) * 2 * 2
       );
+   }
+
+   if (video_stream_index >= 0 && !midi_content)
+   {
+      int frame_size = av_image_get_buffer_size(AV_PIX_FMT_YUV420P,
+            media.width, media.height, 1);
+
+      /* The main thread may render immediately after retro_load_game()
+       * returns. Create its shared presentation buffer before starting the
+       * decoder so an automatic playlist reload cannot race the decoder's
+       * initialization and dereference a NULL video_buffer. */
+      if (frame_size < 0 ||
+          !(video_buffer = video_buffer_create(4, frame_size,
+                media.width, media.height)))
+      {
+         log_cb(RETRO_LOG_ERROR,
+               "[APLAYER] Failed to allocate video presentation buffer.\n");
+         goto error;
+      }
    }
 
    if (!midi_content)
