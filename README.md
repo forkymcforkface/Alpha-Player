@@ -47,6 +47,7 @@ This core has been modified focusing on Raspberry Pi devices using a development
 # General Options
 
 * Auto Resume - ON/OFF, stores the current position for supported seekable files on unload and resumes on the next load
+* Playback Mode - `Play Once`, `Repeat Track`, `Repeat All` or `Shuffle`
 
 # Audio Options
 
@@ -104,6 +105,9 @@ If a video has an external subtitle file with the same name and a `.srt` extensi
 - [X] Better recovery from damaged or inaccurate audio and video timestamps
 - [X] Reduced unnecessary decoding work and buffer growth while seeking or pausing
 - [X] Reduced verbose FFmpeg logging overhead in debug builds, especially for H.264 videos
+- [X] Updated manual M3U track navigation to follow the selected playback mode
+- [X] Improved Shuffle with a randomized first track and random manual track skipping
+- [X] Added complete Libretro Core Options API v2 help text for every option
 
 # v2.10.0
 - [X] Fixed MIDI content failing to load when frontend raw MIDI output is selected but no MIDI device is available

@@ -2415,6 +2415,9 @@ static void append_attachment(const uint8_t *data, size_t size)
 
 void retro_init(void)
 {
+   uint64_t random_seed = (uint64_t)av_gettime_relative();
+
+   srand((unsigned)(random_seed ^ (random_seed >> 32)));
    reset_triggered = false;
    content_loaded = false;
    playlist_source_active = false;
@@ -2521,8 +2524,8 @@ void retro_set_environment(retro_environment_t cb)
    struct retro_core_option_v2_definition option_definitions[] =
    {
       {
-         "aplayer_video_blending", "Frame Blending", "Crossfades adjacent frames to smooth motion when content and display refresh do not match.",
-         NULL, NULL, "video",
+         "aplayer_video_blending", "Frame Blending", NULL,
+         "Crossfades adjacent frames to smooth motion when content and display refresh do not match.", NULL, "video",
          {
             {"off", "Off"},
             {"low", "Low"},
@@ -2533,8 +2536,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "off"
       },
       {
-         "aplayer_video_zoom", "Zoom", "Scales the displayed video image from 0.75x to 1.35x. Above 1.00x, the image progressively crops toward the current frontend display aspect, falling back to the viewport aspect when display information is incomplete.",
-         NULL, NULL, "video",
+         "aplayer_video_zoom", "Zoom", NULL,
+         "Scales the displayed video image from 0.75x to 1.35x. Above 1.00x, the image progressively crops toward the current frontend display aspect, falling back to the viewport aspect when display information is incomplete.", NULL, "video",
          {
             {"0.75", "0.75x"},
             {"0.80", "0.80x"},
@@ -2553,8 +2556,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "1.00"
       },
       {
-         "aplayer_video_deinterlace", "Deinterlace", "Uses FFmpeg YADIF deinterlacing for interlaced video. Auto only deinterlaces frames marked as interlaced, while YADIF Always forces the filter on every frame.",
-         NULL, NULL, "video",
+         "aplayer_video_deinterlace", "Deinterlace", NULL,
+         "Uses FFmpeg YADIF deinterlacing for interlaced video. Auto only deinterlaces frames marked as interlaced, while Always forces the filter on every frame.", NULL, "video",
          {
             {"disabled", "Off"},
             {"auto", "Auto"},
@@ -2563,8 +2566,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "auto"
       },
       {
-         "aplayer_audio_language", "Preferred Language #1", "Selects the first preferred audio track language when matching streams are tagged in the media file. Default uses the file default audio track or first audio track and ignores Preferred Language #2. If unavailable, Preferred Language #2 is tried.",
-         NULL, NULL, "audio",
+         "aplayer_audio_language", "Preferred Language #1", NULL,
+         "Selects the first preferred audio track language when matching streams are tagged in the media file. Default uses the file default audio track or first audio track and ignores Preferred Language #2. If unavailable, Preferred Language #2 is tried.", NULL, "audio",
          {
             {"default", "Default"},
             {"en", "English"},
@@ -2597,8 +2600,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "default"
       },
       {
-         "aplayer_audio_language_2", "Preferred Language #2", "Selects the fallback preferred audio track language when Preferred Language #1 is set to a language but unavailable. Default skips this fallback.",
-         NULL, NULL, "audio",
+         "aplayer_audio_language_2", "Preferred Language #2", NULL,
+         "Selects the fallback preferred audio track language when Preferred Language #1 is set to a language but unavailable. Default skips this fallback.", NULL, "audio",
          {
             {"default", "Default"},
             {"en", "English"},
@@ -2631,8 +2634,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "default"
       },
       {
-         "aplayer_subtitle_mode", "Subtitle Mode", "Controls automatic subtitle track selection when a video is loaded. Manual subtitle cycling remains available with the subtitle toggle button.",
-         NULL, NULL, "subtitles",
+         "aplayer_subtitle_mode", "Subtitle Mode", NULL,
+         "Controls automatic subtitle track selection when a video is loaded. Manual subtitle cycling remains available with the subtitle toggle button.", NULL, "subtitles",
          {
             {"off", "Off"},
             {"forced", "Forced only"},
@@ -2642,8 +2645,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "off"
       },
       {
-         "aplayer_subtitle_language", "Preferred Language", "Selects the subtitle language used by Preferred language subtitle modes. Default uses the file default subtitle track, same-name external subtitle, or first subtitle track.",
-         NULL, NULL, "subtitles",
+         "aplayer_subtitle_language", "Preferred Language", NULL,
+         "Selects the subtitle language used by Preferred language subtitle modes. Default uses the file default subtitle track, same-name external subtitle, or first subtitle track.", NULL, "subtitles",
          {
             {"default", "Default"},
             {"en", "English"},
@@ -2676,7 +2679,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "default"
       },
       {
-         "aplayer_visualizer", "Visualizer", NULL, NULL, NULL, "music",
+         "aplayer_visualizer", "Visualizer", NULL,
+         "Shows a real-time frequency spectrum while playing audio-only and MIDI content. Disabled displays a black screen without affecting audio playback.", NULL, "music",
          {
             {"enabled", "Enabled"},
             {"disabled", "Disabled"},
@@ -2684,7 +2688,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "enabled"
       },
       {
-         "aplayer_midi_output", "MIDI Output", "Selects a RePlay SoundFont for FluidSynth playback or forwards MIDI messages to the frontend MIDI device. Missing SoundFonts and unavailable frontend MIDI output fall back to Default SoundFont. Changes apply when the next MIDI file is loaded.", NULL, NULL, "music",
+         "aplayer_midi_output", "MIDI Output", NULL,
+         "Selects a RePlay SoundFont for FluidSynth playback or forwards MIDI messages to the frontend MIDI device. Missing SoundFonts and unavailable frontend MIDI output fall back to Default SoundFont. Changes apply when the next MIDI file is loaded.", NULL, "music",
          {
             {"default", "Default SoundFont"},
             {"roland_sc55", "Roland SC-55"},
@@ -2696,7 +2701,8 @@ void retro_set_environment(retro_environment_t cb)
          }, "default"
       },
       {
-         "aplayer_auto_resume", "Auto Resume", NULL, NULL, NULL, NULL,
+         "aplayer_auto_resume", "Auto Resume", NULL,
+         "Saves the playback position, playlist item, and selected audio and subtitle tracks when content is closed, then restores them the next time the same content is loaded.", NULL, NULL,
          {
             {"disabled", "OFF"},
             {"enabled", "ON"},
@@ -2704,12 +2710,13 @@ void retro_set_environment(retro_environment_t cb)
          }, "disabled"
       },
       {
-         "aplayer_loop_content", "Loop Mode", NULL, NULL, NULL, NULL,
+         "aplayer_loop_content", "Playback Mode", NULL,
+         "Controls playlist order and end-of-playback behavior. Play Once plays the list once; Repeat Track repeats the current item; Repeat All repeats the entire list; Shuffle chooses a different random item after each track. With a single file, Repeat Track, Repeat All, and Shuffle repeat that file.", NULL, NULL,
          {
-            {"0", "Play Track"},
-            {"1", "Loop Track"},
-            {"2", "Loop All"},
-            {"3", "Shuffle All"},
+            {"0", "Play Once"},
+            {"1", "Repeat Track"},
+            {"2", "Repeat All"},
+            {"3", "Shuffle"},
             {NULL, NULL}
          }, "0"
       },
@@ -4667,24 +4674,46 @@ void retro_run(void)
       /* Handle Next/Previous Track with L/R buttons */
       if (playlist_count > 0)
       {
-         if (r && !last_r)
+         bool change_track = (r && !last_r) || (l && !last_l);
+
+         if (change_track)
          {
             slock_lock(decode_thread_lock);
-            unsigned new_index = (playlist_index + 1) % playlist_count;
+
+            unsigned new_index = playlist_index;
+
+            if (loopcontent == SHUFFLE_ALL)
+            {
+               do
+               {
+                  new_index = rand() % playlist_count;
+               } while (playlist_count > 1 && new_index == playlist_index);
+            }
+            else if (loopcontent == PLAY_TRACK)
+            {
+               if (r && playlist_index + 1 < playlist_count)
+                  new_index++;
+               else if (l && playlist_index > 0)
+                  new_index--;
+            }
+            else if (r)
+               new_index = (playlist_index + 1) % playlist_count;
+            else
+               new_index = (playlist_index + playlist_count - 1) % playlist_count;
+
             if (new_index != playlist_index)
             {
                playlist_index = new_index;
                do_seek = true;
                seek_time = 0.0;
-               // Display track change message with file name only
+
                char msg[256];
                struct retro_message_ext msg_obj = {0};
-
-               // Extract the file name from the full path
                const char *full_path = playlist[playlist_index];
                const char *filename = strrchr(full_path, '/');
+
                if (filename)
-                  filename++;  // Skip the '/' character
+                  filename++;
                else
                   filename = full_path;
 
@@ -4698,39 +4727,7 @@ void retro_run(void)
                msg_obj.progress = -1;
                environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &msg_obj);
             }
-            slock_unlock(decode_thread_lock);
-         }
-         else if (l && !last_l)
-         {
-            slock_lock(decode_thread_lock);
-            unsigned new_index = (playlist_index - 1 + playlist_count) % playlist_count;
-            if (new_index != playlist_index)
-            {
-               playlist_index = new_index;
-               do_seek = true;
-               seek_time = 0.0;
-               // Display track change message with file name only
-               char msg[256];
-               struct retro_message_ext msg_obj = {0};
 
-               // Extract the file name from the full path
-               const char *full_path = playlist[playlist_index];
-               const char *filename = strrchr(full_path, '/');
-               if (filename)
-                  filename++;  // Skip the '/' character
-               else
-                  filename = full_path;
-
-               snprintf(msg, sizeof(msg), "%d/%d %s", playlist_index + 1, playlist_count, filename);
-               msg_obj.msg = msg;
-               msg_obj.duration = 3000;
-               msg_obj.priority = 1;
-               msg_obj.level = RETRO_LOG_INFO;
-               msg_obj.target = RETRO_MESSAGE_TARGET_OSD;
-               msg_obj.type = RETRO_MESSAGE_TYPE_NOTIFICATION;
-               msg_obj.progress = -1;
-               environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE_EXT, &msg_obj);
-            }
             slock_unlock(decode_thread_lock);
          }
       }
@@ -9338,6 +9335,8 @@ bool retro_load_game(const struct retro_game_info *info)
          have_bookmark = true;
          aplayer_bookmark_restore_playlist_index(&bookmark);
       }
+      else if (loopcontent == SHUFFLE_ALL)
+         playlist_index = rand() % playlist_count;
 
       local_info.path = playlist[playlist_index];
       local_info.size = info->size;
