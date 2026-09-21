@@ -152,6 +152,7 @@ static bool reset_triggered;
 static bool libretro_supports_bitmasks = false;
 static unsigned input_ports = 1;
 static unsigned controller_port_devices[APLAYER_MAX_PORTS];
+#define APLAYER_TRIGGER_PRESS_THRESHOLD 32439 /* 99% of INT16_MAX */
 static bool auto_resume_enabled = false;
 static bool suppress_auto_resume_save = false;
 static bool content_loaded = false;
@@ -292,16 +293,44 @@ static void aplayer_register_input_layout(void)
 static uint16_t aplayer_poll_input_mask(unsigned port)
 {
    uint16_t ret = 0;
+   int16_t l2_analog;
+   int16_t r2_analog;
 
    if (libretro_supports_bitmasks)
-      return (uint16_t)input_state_cb(port, RETRO_DEVICE_JOYPAD,
+      ret = (uint16_t)input_state_cb(port, RETRO_DEVICE_JOYPAD,
             0, RETRO_DEVICE_ID_JOYPAD_MASK);
-
+   else
    {
       unsigned i;
       for (i = RETRO_DEVICE_ID_JOYPAD_B; i <= RETRO_DEVICE_ID_JOYPAD_R2; i++)
          if (input_state_cb(port, RETRO_DEVICE_JOYPAD, 0, i))
             ret |= (1U << i);
+   }
+
+   /*
+    * Prefer raw analog trigger values when provided, so L2/R2 seeks only
+    * activate after a near-full (99%) trigger press. Preserve digital-only
+    * controller bindings, which report zero for analog button input.
+    */
+   l2_analog = input_state_cb(port, RETRO_DEVICE_ANALOG,
+         RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_L2);
+   r2_analog = input_state_cb(port, RETRO_DEVICE_ANALOG,
+         RETRO_DEVICE_INDEX_ANALOG_BUTTON, RETRO_DEVICE_ID_JOYPAD_R2);
+
+   if (l2_analog > 0)
+   {
+      if (l2_analog >= APLAYER_TRIGGER_PRESS_THRESHOLD)
+         ret |= (1U << RETRO_DEVICE_ID_JOYPAD_L2);
+      else
+         ret &= ~(1U << RETRO_DEVICE_ID_JOYPAD_L2);
+   }
+
+   if (r2_analog > 0)
+   {
+      if (r2_analog >= APLAYER_TRIGGER_PRESS_THRESHOLD)
+         ret |= (1U << RETRO_DEVICE_ID_JOYPAD_R2);
+      else
+         ret &= ~(1U << RETRO_DEVICE_ID_JOYPAD_R2);
    }
 
    return ret;
